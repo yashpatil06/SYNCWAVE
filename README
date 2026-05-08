@@ -1,1 +1,74 @@
-This is my project
+# SyncWave
+
+SyncWave is a full-stack web application built with React on the client and Node.js + Express on the server. It uses Socket.IO for real-time communication and supports file uploads and streaming features.
+
+## Project structure
+
+- `client/` – React front-end application
+- `server/` – Node.js/Express API server
+- `Dockerfile` – Multi-stage Docker build for production
+
+## Requirements
+
+- Node.js 18+ installed
+- npm 9+ installed
+- Docker installed (optional)
+
+## Local development
+
+### Start the server
+
+1. Open a terminal in `server/`
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. Start the server:
+   ```bash
+   npm start
+   ```
+
+The server runs on port `3001` by default.
+
+### Start the client
+
+1. Open a terminal in `client/`
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. Start the client:
+   ```bash
+   npm start
+   ```
+
+The React app runs on the default port for `react-scripts`, typically `3000`.
+
+## Build for production
+
+### Build the client
+
+From `client/`:
+
+```bash
+npm run build
+```
+
+### Run the server with the built client
+
+After building the client, the server can serve the production build from `client/build`.
+
+## Docker
+
+Build and run the app using the included `Dockerfile`:
+
+```bash
+docker build -t syncwave .
+docker run -p 3001:3001 syncwave
+```
+
+## Notes
+
+- The server uses `cors`, `express`, `multer`, `socket.io`, and `uuid`.
+- The client uses `react`, `react-dom`, and `socket.io-client`.
+- The Dockerfile performs a multi-stage build and exposes port `3001`.
