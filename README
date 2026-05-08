@@ -1,74 +1,232 @@
-# SyncWave
+# 🎵 SyncWave
 
-SyncWave is a full-stack web application built with React on the client and Node.js + Express on the server. It uses Socket.IO for real-time communication and supports file uploads and streaming features.
+> **Real-time synchronized music listening — together, no matter where you are.**
 
-## Project structure
+SyncWave lets you and your friends listen to music in perfect sync. Create a room, invite others, and enjoy shared listening sessions with uploaded audio files or YouTube streams — all controlled with live playback, a queue, and in-session chat.
 
-- `client/` – React front-end application
-- `server/` – Node.js/Express API server
-- `Dockerfile` – Multi-stage Docker build for production
+---
 
-## Requirements
+## ✨ Features
 
-- Node.js 18+ installed
-- npm 9+ installed
-- Docker installed (optional)
+- 🔴 **Live Room System** — Create or join rooms with a 6-character code
+- 🎧 **Synchronized Playback** — Every listener hears the same thing at the same moment
+- 📁 **Audio File Upload** — Drag & drop MP3, WAV, FLAC, OGG, M4A (up to 50MB each)
+- ▶️ **YouTube Streaming** — Paste any YouTube URL to add it to the queue
+- 📋 **Shared Queue** — Add, reorder, and remove tracks collaboratively
+- 🔒 **Permission System** — Hosts grant or revoke playback control per listener
+- 💬 **Live Chat** — In-room messaging with unread badge notifications
+- ⚡ **Real-time Sync** — Latency-compensated position syncing for new joiners
+- 🌐 **WebSocket Powered** — Built on Socket.IO for low-latency communication
 
-## Local development
+---
 
-### Start the server
+## 🖼️ Tech Stack
 
-1. Open a terminal in `server/`
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Start the server:
-   ```bash
-   npm start
-   ```
+| Layer | Technology |
+|---|---|
+| **Frontend** | React 18, Socket.IO Client, YouTube IFrame API |
+| **Backend** | Node.js, Express, Socket.IO, Multer |
+| **Real-time** | WebSocket (Socket.IO) |
+| **Containerization** | Docker (multi-stage build) |
 
-The server runs on port `3001` by default.
+---
 
-### Start the client
+## 📁 Project Structure
 
-1. Open a terminal in `client/`
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Start the client:
-   ```bash
-   npm start
-   ```
-
-The React app runs on the default port for `react-scripts`, typically `3000`.
-
-## Build for production
-
-### Build the client
-
-From `client/`:
-
-```bash
-npm run build
+```
+syncwave/
+├── client/                  # React frontend
+│   ├── public/
+│   │   └── index.html       # YouTube IFrame API script tag
+│   └── src/
+│       ├── App.js           # Main component (landing + room UI)
+│       └── index.js         # React entry point
+├── server/
+│   ├── index.js             # Express + Socket.IO server
+│   ├── uploads/             # Uploaded audio files (auto-created)
+│   └── package.json
+├── Dockerfile               # Multi-stage production build
+└── README.md
 ```
 
-### Run the server with the built client
+---
 
-After building the client, the server can serve the production build from `client/build`.
+## 🚀 Getting Started
 
-## Docker
+### Prerequisites
 
-Build and run the app using the included `Dockerfile`:
+- **Node.js** 18 or higher
+- **npm** 9 or higher
+- **Docker** (optional, for containerized deployment)
+
+---
+
+### Local Development
+
+#### 1. Start the Server
 
 ```bash
+cd server
+npm install
+npm start
+```
+
+The server starts on **http://localhost:3001**
+
+#### 2. Start the Client
+
+Open a new terminal:
+
+```bash
+cd client
+npm install
+npm start
+```
+
+The React app starts on **http://localhost:3000**
+
+> The client proxies API calls and WebSocket connections to the server automatically.
+
+---
+
+### Environment Variables
+
+By default, the client connects to `http://localhost:3001`. To point to a different server, set:
+
+```bash
+REACT_APP_SERVER=https://your-server-url.com
+```
+
+---
+
+## 🐳 Docker
+
+Build and run the full application in a single container:
+
+```bash
+# Build the image
 docker build -t syncwave .
+
+# Run the container
 docker run -p 3001:3001 syncwave
 ```
 
-## Notes
+Then open **http://localhost:3001** in your browser.
 
-- The server uses `cors`, `express`, `multer`, `socket.io`, and `uuid`.
-- The client uses `react`, `react-dom`, and `socket.io-client`.
-- The Dockerfile performs a multi-stage build and exposes port `3001`.
+The Dockerfile uses a multi-stage build:
+1. **Stage 1** — Builds the React client
+2. **Stage 2** — Sets up the Node.js server and copies the built client into it
+
+---
+
+## 🎮 How to Use
+
+### Creating a Room
+
+1. Enter your name on the landing page
+2. Click **Create a Room**
+3. Share the 6-character room code with friends (click it to copy)
+
+### Joining a Room
+
+1. Enter your name and the room code
+2. Click **Join**
+
+### Adding Music
+
+If you have playback control (host or granted permission):
+
+- **Upload Tab** — Drag & drop audio files or click to browse
+- **YouTube Tab** — Paste a YouTube URL and click Add
+
+### Host Controls
+
+- Click the 🔓/🔒 icon next to any listener to grant or revoke their playback control
+- The host always retains control
+- If the host leaves, the room is dissolved
+
+---
+
+## 🔌 API Reference
+
+### REST Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/upload` | Upload an audio file (multipart/form-data, field: `audio`) |
+| `GET` | `/room/:roomId` | Get current room state (members, queue, playback state) |
+
+### Socket.IO Events
+
+#### Client → Server
+
+| Event | Payload | Description |
+|-------|---------|-------------|
+| `create_room` | `{ name }` | Create a new room |
+| `join_room` | `{ roomId, name }` | Join an existing room |
+| `play_pause` | `{ roomId, playing, position }` | Toggle playback |
+| `seek` | `{ roomId, position }` | Seek to position (seconds) |
+| `add_to_queue` | `{ roomId, track }` | Add an uploaded track |
+| `stream_track` | `{ roomId, youtubeId, title, thumbnail }` | Add a YouTube track |
+| `next_track` | `{ roomId }` | Skip to next track |
+| `prev_track` | `{ roomId }` | Go to previous track |
+| `remove_from_queue` | `{ roomId, trackId }` | Remove a track from queue |
+| `toggle_permission` | `{ roomId, memberId }` | Grant/revoke listener control (host only) |
+| `chat_message` | `{ roomId, text }` | Send a chat message |
+
+#### Server → Client
+
+| Event | Description |
+|-------|-------------|
+| `room_created` | Emitted to host after room creation |
+| `room_joined` | Emitted to joiner with current room state |
+| `sync_state` | Playback sync broadcast to all room members |
+| `queue_updated` | Broadcast when queue or track changes |
+| `members_updated` | Broadcast when a member joins/leaves/permission changes |
+| `permission_changed` | Emitted to the affected member |
+| `chat_message` | Broadcast chat message to all members |
+| `room_dissolved` | Emitted when the host disconnects |
+| `user_joined` / `user_left` | Notification events for room activity |
+
+---
+
+## 🏗️ Architecture Notes
+
+- **Room state** is stored in-memory on the server. Restarting the server clears all rooms.
+- **Playback sync** accounts for network latency: the server timestamps every sync event and the client compensates by adding elapsed time when calculating the correct seek position.
+- **YouTube audio** uses the hidden YouTube IFrame Player API — all listeners load the same video client-side, controlled by sync events.
+- **File uploads** are stored in `server/uploads/` and served as static files. Files persist until the server restarts (or the directory is cleared).
+
+---
+
+## ⚠️ Known Limitations
+
+- Room state is **not persisted** — server restarts clear all rooms and queues
+- Uploaded files are **not cleaned up** automatically
+- YouTube playback sync may vary slightly due to YouTube's buffering behavior
+- No authentication — anyone with a room code can join
+
+---
+
+## 🛠️ Development Tips
+
+- Use `nodemon` for hot-reloading the server during development:
+  ```bash
+  cd server
+  npm install -D nodemon
+  npx nodemon index.js
+  ```
+- The client uses `react-scripts` (Create React App), so standard CRA tooling applies
+- Socket events can be debugged in the browser console — Socket.IO logs connection details
+
+---
+
+## 📄 License
+
+MIT — feel free to fork, extend, and deploy your own SyncWave instance.
+
+---
+
+<div align="center">
+  Built with ♥ for shared listening experiences
+</div>
