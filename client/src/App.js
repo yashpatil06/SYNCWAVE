@@ -738,7 +738,16 @@ export default function App() {
     const socket = io(SERVER, { transports: ['websocket'] })
     socketRef.current = socket
 
+    socket.on('connect', () => {
+      console.log('🔗 Socket connected:', socket.id)
+    })
+
+    socket.on('disconnect', (reason) => {
+      console.log('❌ Socket disconnected:', reason)
+    })
+
     socket.on('room_created', ({ roomId, room }) => {
+      console.log('✅ Room created:', roomId, 'isHost=true, canControl=true')
       setRoomId(roomId)
       setIsHost(true)
       setCanControl(true)
@@ -747,23 +756,48 @@ export default function App() {
     })
 
     socket.on('room_joined', ({ roomId, room, isHost: h, currentState }) => {
+      console.log(`✅ Joined room ${roomId}`, {
+        members: room.members.length,
+        queueSize: room.queue.length,
+        currentTrack: room.state.currentTrack?.name,
+        isHost: h,
+      })
+
       setRoomId(roomId)
       setIsHost(h)
       setCanControl(h)
       setMembers(room.members)
       setQueue(room.queue)
+
       if (room.state.currentTrack) {
         setCurrentTrack(room.state.currentTrack)
-        // Sync position accounting for latency
+
+        let syncPos = room.state.position
+        let shouldPlay = room.state.playing
+
         if (currentState) {
           const elapsed = (Date.now() - currentState.serverTime) / 1000
-          const syncPos =
-            currentState.position + (currentState.playing ? elapsed : 0)
-          setPosition(syncPos)
-          setPlaying(currentState.playing)
+          syncPos = currentState.position + (currentState.playing ? elapsed : 0)
+          shouldPlay = currentState.playing
+          console.log(`📍 Sync adjustment: +${elapsed.toFixed(2)}s latency`, {
+            serverPos: currentState.position,
+            calculatedPos: syncPos.toFixed(2),
+          })
         }
+
+        setPosition(syncPos)
+        setPlaying(shouldPlay)
+
+        // CRITICAL: Load the track so audio element has src
+        loadTrack(room.state.currentTrack, syncPos, false)
+      } else {
+        setCurrentTrack(null)
+        setPosition(0)
+        setPlaying(false)
       }
+
       setScreen('room')
+      showToast(`Connected to room ${roomId}`, 3000)
     })
 
     socket.on('error', ({ message }) => setError(message))
@@ -776,26 +810,44 @@ export default function App() {
     socket.on(
       'sync_state',
       ({ playing: p, position: pos, currentTrack: ct, serverTime }) => {
+        console.log('📡 Sync received:', {
+          playing: p,
+          position: pos.toFixed(2),
+          track: ct?.name,
+        })
         const elapsed = (Date.now() - serverTime) / 1000
         const syncPos = pos + (p ? elapsed : 0)
         setPlaying(p)
         setPosition(syncPos)
-        if (ct) setCurrentTrack(ct)
+        if (ct) {
+          setCurrentTrack(ct)
+        } else {
+          setCurrentTrack(null)
+        }
         applySyncToMedia(p, syncPos, ct)
       },
     )
 
     socket.on('queue_updated', ({ queue: q, state }) => {
+      console.log('📋 Queue updated:', {
+        queueSize: q.length,
+        currentTrack: state.currentTrack?.name,
+      })
       setQueue(q)
       if (state.currentTrack) {
         setCurrentTrack(state.currentTrack)
         setPlaying(state.playing)
         setPosition(state.position)
         loadTrack(state.currentTrack, state.position, state.playing)
+      } else {
+        setCurrentTrack(null)
+        setPlaying(false)
+        setPosition(0)
       }
     })
 
     socket.on('permission_changed', ({ canControl: c }) => {
+      console.log('👤 Permission changed:', { canControl: c })
       setCanControl(c)
       setPermBanner(
         c ? 'You now have playback control!' : 'Playback control removed',
@@ -817,6 +869,18 @@ export default function App() {
 
     return () => socket.disconnect()
   }, [])
+
+  // Periodic sync every 10 seconds to prevent drift
+  useEffect(() => {
+    if (!roomId || !playing) return
+
+    const syncTimer = setInterval(() => {
+      console.log('📡 Sending periodic sync request (anti-drift)')
+      socketRef.current?.emit('request_sync', { roomId })
+    }, 10000)
+
+    return () => clearInterval(syncTimer)
+  }, [playing, roomId])
 
   // Position ticker
   useEffect(() => {
@@ -840,8 +904,29 @@ export default function App() {
     setRoomId('')
   }
 
+  function clearMedia() {
+    const audio = audioRef.current
+    if (audio) {
+      audio.pause()
+      audio.src = ''
+      audio.load()
+    }
+    if (ytReadyRef.current) {
+      try {
+        ytPlayerRef.current?.stopVideo()
+      } catch (err) {
+        console.warn('Could not stop YouTube:', err)
+      }
+    }
+  }
+
   /* ── Media control helpers ───────────────────────────────────────────── */
   function applySyncToMedia(p, pos, track) {
+    if (!track) {
+      clearMedia()
+      return
+    }
+
     const audio = audioRef.current
     if (audio && track?.type !== 'youtube') {
       const nextSrc = SERVER + track.url
@@ -849,86 +934,250 @@ export default function App() {
         audio.src = nextSrc
         audio.load()
       }
-      const syncAudio = () => {
-        audio.currentTime = pos
-        if (p) audio.play().catch(() => {})
-        else audio.pause()
+      const syncAudio = async () => {
+        try {
+          audio.currentTime = pos
+          if (p) {
+            const playPromise = audio.play()
+            if (playPromise !== undefined) {
+              await playPromise
+              console.log('✅ Audio playing at position', pos.toFixed(2))
+            }
+          } else {
+            audio.pause()
+            console.log('✅ Audio paused')
+          }
+        } catch (err) {
+          console.error('❌ Audio playback failed:', err.name, err.message, {
+            readyState: audio.readyState,
+            src: audio.src,
+            paused: audio.paused,
+            currentTime: audio.currentTime,
+          })
+          if (err.name === 'NotAllowedError') {
+            showToast('🔊 Autoplay blocked. Click play to start.', 4000)
+          } else if (err.name === 'NotSupportedError') {
+            showToast('⚠️ Audio format not supported', 4000)
+          }
+        }
       }
-      if (audio.readyState >= 1) syncAudio()
-      else audio.addEventListener('loadedmetadata', syncAudio, { once: true })
+
+      if (audio.readyState >= 2) {
+        syncAudio()
+      } else {
+        const handler = () => {
+          audio.removeEventListener('canplay', handler)
+          syncAudio()
+        }
+        audio.addEventListener('canplay', handler, { once: true })
+        const timeout = setTimeout(() => {
+          audio.removeEventListener('canplay', handler)
+          console.warn('⚠️ Audio load timeout')
+        }, 5000)
+      }
     }
+
     if (ytReadyRef.current && track?.type === 'youtube') {
       try {
-        ytPlayerRef.current?.seekTo(pos, true)
-        if (p) ytPlayerRef.current?.playVideo()
-        else ytPlayerRef.current?.pauseVideo()
-      } catch {}
+        const player = ytPlayerRef.current
+        if (!player) {
+          console.error('❌ YouTube player not initialized')
+          showToast('YouTube player not ready', 4000)
+          return
+        }
+        player.seekTo(pos, true)
+        if (p) {
+          player.playVideo()
+          console.log('✅ YouTube playing')
+        } else {
+          player.pauseVideo()
+          console.log('✅ YouTube paused')
+        }
+      } catch (err) {
+        console.error('❌ YouTube control failed:', err, {
+          playerReady: ytReadyRef.current,
+          playerExists: !!ytPlayerRef.current,
+        })
+      }
     }
   }
 
   function loadTrack(track, pos = 0, autoPlay = false) {
-    if (!track) return
+    if (!track) {
+      console.warn('⚠️ loadTrack called with null track')
+      return
+    }
+
+    console.log(`📍 Loading track: ${track.name} (type: ${track.type})`)
+
     if (track.type === 'youtube') {
-      if (ytReadyRef.current) {
-        ytPlayerRef.current?.loadVideoById({
-          videoId: track.youtubeId,
-          startSeconds: pos,
-        })
-        if (!autoPlay) setTimeout(() => ytPlayerRef.current?.pauseVideo(), 500)
+      if (!ytReadyRef.current) {
+        console.error('❌ YouTube player not ready yet')
+        showToast('YouTube player initializing...', 3000)
+        return
       }
-      if (audioRef.current) {
-        audioRef.current.pause()
-        audioRef.current.src = ''
+
+      try {
+        const player = ytPlayerRef.current
+        if (!player) {
+          console.error('❌ YouTube player ref is null')
+          return
+        }
+
+        player.loadVideoById({
+          videoId: track.youtubeId,
+          startSeconds: Math.max(0, pos),
+        })
+        console.log(`✅ YouTube loaded: ${track.youtubeId}`)
+
+        if (!autoPlay) {
+          setTimeout(() => {
+            try {
+              player.pauseVideo()
+            } catch (err) {
+              console.warn('Could not pause YouTube:', err)
+            }
+          }, 300)
+        }
+      } catch (err) {
+        console.error('❌ Failed to load YouTube video:', err, {
+          youtubeId: track.youtubeId,
+          playerReady: ytReadyRef.current,
+        })
+        showToast('Failed to load YouTube video', 4000)
+      }
+
+      const audio = audioRef.current
+      if (audio) {
+        audio.pause()
+        audio.src = ''
       }
     } else {
       const audio = audioRef.current
-      if (audio) {
-        const nextSrc = SERVER + track.url
-        const sourceChanged = audio.src !== nextSrc
-        if (sourceChanged) {
-          audio.src = nextSrc
-          audio.load()
-        }
-        const startPlayback = () => {
-          audio.currentTime = pos
-          if (autoPlay) audio.play().catch(() => {})
-        }
-        if (audio.readyState >= 1) startPlayback()
-        else
-          audio.addEventListener('loadedmetadata', startPlayback, {
-            once: true,
-          })
+      if (!audio) {
+        console.error('❌ Audio ref not available')
+        return
       }
+
+      const nextSrc = SERVER + track.url
+      const sourceChanged = audio.src !== nextSrc
+
+      if (sourceChanged) {
+        console.log(`🔊 Setting audio source: ${nextSrc}`)
+        audio.src = nextSrc
+        audio.load()
+      }
+
+      const startPlayback = async () => {
+        try {
+          audio.currentTime = pos
+          if (autoPlay) {
+            console.log(`▶️ Starting autoplay at ${pos.toFixed(2)}s`)
+            const playPromise = audio.play()
+            if (playPromise !== undefined) {
+              await playPromise
+              console.log('✅ Audio auto-playing')
+            }
+          } else {
+            console.log(`⏸️ Loaded, paused at ${pos.toFixed(2)}s`)
+          }
+        } catch (err) {
+          console.error('❌ Playback error:', err.name, err.message)
+          if (err.name === 'NotAllowedError') {
+            showToast('🔊 Click play to start audio', 5000)
+          }
+        }
+      }
+
+      if (audio.readyState >= 2) {
+        startPlayback()
+      } else {
+        console.log('⏳ Waiting for audio metadata...')
+        const handler = () => {
+          audio.removeEventListener('canplay', handler)
+          startPlayback()
+        }
+        audio.addEventListener('canplay', handler, { once: true })
+        const timeout = setTimeout(() => {
+          audio.removeEventListener('canplay', handler)
+          console.warn('⚠️ Audio load timeout')
+        }, 8000)
+      }
+
       if (ytReadyRef.current) {
         try {
           ytPlayerRef.current?.stopVideo()
-        } catch {}
+        } catch (err) {
+          console.warn('Could not stop YouTube:', err)
+        }
       }
     }
   }
 
   /* ── YouTube IFrame API ─────────────────────────────────────────────── */
   useEffect(() => {
-    window.onYouTubeIframeAPIReady = () => {
+    const initYTPlayer = () => {
+      if (!window.YT || !window.YT.Player) {
+        console.warn('⏳ Waiting for YouTube API...')
+        setTimeout(initYTPlayer, 500)
+        return
+      }
+
+      console.log('🎬 Initializing YouTube player')
       ytPlayerRef.current = new window.YT.Player('yt-player', {
         height: '1',
         width: '1',
         events: {
           onReady: () => {
+            console.log('✅ YouTube player ready')
             ytReadyRef.current = true
-            ytPlayerRef.current.setVolume(volume)
+            try {
+              ytPlayerRef.current.setVolume(volume)
+            } catch (err) {
+              console.warn('Could not set YT volume:', err)
+            }
           },
           onStateChange: (e) => {
-            if (e.data === window.YT?.PlayerState?.ENDED) {
-              if (isHost || canControl)
-                socketRef.current?.emit('next_track', { roomId })
+            const stateNames = {
+              '-1': 'UNSTARTED',
+              0: 'ENDED',
+              1: 'PLAYING',
+              2: 'PAUSED',
+              3: 'BUFFERING',
+              5: 'CUED',
             }
+            console.log(`📺 YouTube state: ${stateNames[e.data] || e.data}`)
+
+            if (e.data === window.YT?.PlayerState?.ENDED) {
+              if (isHost || canControl) {
+                console.log('⏭️ Auto-skipping to next track')
+                socketRef.current?.emit('next_track', { roomId })
+              }
+            }
+          },
+          onError: (e) => {
+            const errorCodes = {
+              2: 'Invalid parameter',
+              5: 'HTML5 player error',
+              100: 'Video not found',
+              101: 'Video cannot be played',
+              150: 'Same as 151',
+              151: 'Video cannot be played',
+            }
+            console.error(
+              '❌ YouTube player error:',
+              e.data,
+              errorCodes[e.data] || 'Unknown',
+            )
+            showToast('YouTube playback error. Try another video.', 5000)
           },
         },
       })
     }
-    if (window.YT && window.YT.Player) window.onYouTubeIframeAPIReady()
-  }, [])
+
+    window.onYouTubeIframeAPIReady = initYTPlayer
+    initYTPlayer()
+  }, [isHost, canControl, roomId, volume])
 
   // Volume control
   useEffect(() => {
@@ -964,25 +1213,91 @@ export default function App() {
     })
   }
 
-  function togglePlayPause() {
-    if (!canControl && !isHost) return
-    const newPlaying = !playing
-    setPlaying(newPlaying)
-    socketRef.current?.emit('play_pause', {
-      roomId,
-      playing: newPlaying,
-      position: positionRef.current,
+  async function togglePlayPause() {
+    console.log('🎵 PLAY/PAUSE clicked', {
+      isHost,
+      canControl,
+      currentTrack: currentTrack?.name,
     })
-    const audio = audioRef.current
-    if (audio && currentTrack?.type !== 'youtube') {
-      newPlaying ? audio.play().catch(() => {}) : audio.pause()
+    if (!canControl && !isHost) {
+      showToast('Only host can control playback', 2000)
+      console.warn('❌ Permission denied - not host and no control')
+      return
     }
-    if (currentTrack?.type === 'youtube' && ytReadyRef.current) {
-      try {
-        newPlaying
-          ? ytPlayerRef.current?.playVideo()
-          : ytPlayerRef.current?.pauseVideo()
-      } catch {}
+    if (!currentTrack) {
+      showToast('No track loaded', 2000)
+      console.warn('❌ No current track')
+      return
+    }
+
+    const requestedPlaying = !playing
+    console.log(
+      `${requestedPlaying ? '▶️ PLAY' : '⏸️ PAUSE'} at ${positionRef.current.toFixed(2)}s`,
+    )
+
+    const emitPlayState = (playState) => {
+      setPlaying(playState)
+      socketRef.current?.emit('play_pause', {
+        roomId,
+        playing: playState,
+        position: positionRef.current,
+      })
+    }
+
+    if (currentTrack.type !== 'youtube') {
+      const audio = audioRef.current
+      if (!audio) {
+        console.error('❌ Audio element not available')
+        return
+      }
+
+      if (requestedPlaying) {
+        try {
+          const playPromise = audio.play()
+          if (playPromise !== undefined) {
+            await playPromise
+          }
+          console.log('✅ HTML5 audio playing')
+          emitPlayState(true)
+        } catch (err) {
+          console.error('❌ HTML5 play failed:', err.name, err.message)
+          if (err.name === 'NotAllowedError') {
+            showToast('🔊 Autoplay blocked. Click play button.', 4000)
+          } else {
+            showToast('Failed to play audio', 4000)
+          }
+        }
+      } else {
+        audio.pause()
+        console.log('✅ HTML5 audio paused')
+        emitPlayState(false)
+      }
+      return
+    }
+
+    if (!ytReadyRef.current) {
+      console.error('❌ YouTube player not ready')
+      showToast('YouTube player not ready', 3000)
+      return
+    }
+
+    try {
+      const player = ytPlayerRef.current
+      if (!player) {
+        throw new Error('YouTube player ref is null')
+      }
+
+      if (requestedPlaying) {
+        player.playVideo()
+      } else {
+        player.pauseVideo()
+      }
+
+      console.log(`✅ YouTube ${requestedPlaying ? 'playing' : 'paused'}`)
+      emitPlayState(requestedPlaying)
+    } catch (err) {
+      console.error('❌ YouTube control failed:', err)
+      showToast('Failed to control YouTube playback', 3000)
     }
   }
 
@@ -1003,12 +1318,30 @@ export default function App() {
   }
 
   function skipNext() {
-    if (!canControl && !isHost) return
+    console.log('⏭️ NEXT clicked', {
+      isHost,
+      canControl,
+      roomId,
+      queueSize: queue.length,
+    })
+    if (!canControl && !isHost) {
+      console.warn('❌ Permission denied for next_track')
+      return
+    }
     socketRef.current?.emit('next_track', { roomId })
   }
 
   function skipPrev() {
-    if (!canControl && !isHost) return
+    console.log('⏮️ PREV clicked', {
+      isHost,
+      canControl,
+      roomId,
+      queueSize: queue.length,
+    })
+    if (!canControl && !isHost) {
+      console.warn('❌ Permission denied for prev_track')
+      return
+    }
     socketRef.current?.emit('prev_track', { roomId })
   }
 
@@ -1034,15 +1367,22 @@ export default function App() {
 
   /* ── Upload handler ─────────────────────────────────────────────────── */
   async function handleFiles(files) {
+    console.log('📤 Files selected for upload:', {
+      count: files.length,
+      files: files.map((f) => f.name),
+    })
     if (!canControl && !isHost) {
       showToast('You do not have control permissions')
+      console.warn('❌ Upload denied - not host and no control')
       return
     }
     for (const file of files) {
       if (!file.type.startsWith('audio/')) {
         showToast('Only audio files supported')
+        console.warn('⚠️ Skipping non-audio file:', file.name, file.type)
         continue
       }
+      console.log(`📤 Uploading: ${file.name}`)
       setUploading(true)
       const fd = new FormData()
       fd.append('audio', file)
@@ -1053,7 +1393,9 @@ export default function App() {
           body: fd,
         })
         const data = await res.json()
+        console.log(`✅ Upload response for ${file.name}:`, data)
         if (data.url) {
+          console.log(`📡 Emitting add_to_queue for ${file.name}`)
           socketRef.current?.emit('add_to_queue', {
             roomId,
             track: {
@@ -1064,8 +1406,12 @@ export default function App() {
             },
           })
           showToast(`Added: ${file.name}`)
+        } else {
+          console.error('❌ No URL in upload response:', data)
+          showToast('Upload failed: no URL returned')
         }
       } catch (e) {
+        console.error('❌ Upload error:', e)
         showToast('Upload failed')
       } finally {
         setUploading(false)
@@ -1252,9 +1598,14 @@ export default function App() {
       {/* Hidden audio + YouTube container */}
       <audio
         ref={audioRef}
-        preload="auto"
+        preload="metadata"
+        muted={false}
         onLoadedMetadata={onAudioLoaded}
         onEnded={onAudioEnded}
+        onError={(e) => {
+          const errorMsg = e.target.error?.message || 'Unknown error'
+          console.error('🔊 Audio error:', e.target.error?.code, errorMsg)
+        }}
         style={{ display: 'none' }}
       />
       <div id="yt-player-container">

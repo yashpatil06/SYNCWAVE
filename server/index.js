@@ -16,7 +16,20 @@ const io = new Server(server, {
 
 app.use(cors())
 app.use(express.json())
-app.use('/uploads', express.static(UPLOAD_DIR))
+
+// Explicit CORS and cache headers for audio files (production-ready)
+app.use(
+  '/uploads',
+  (req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*')
+    res.header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+    res.header('Access-Control-Allow-Headers', 'Content-Type')
+    res.header('Cache-Control', 'public, max-age=3600') // 1 hour cache
+    res.header('Accept-Ranges', 'bytes') // Enable range requests for seeking
+    next()
+  },
+  express.static(UPLOAD_DIR),
+)
 app.use(express.static(path.join(__dirname, '../client/build')))
 
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR)
@@ -81,7 +94,7 @@ app.get('/room/:roomId', (req, res) => {
 
 // ── Socket.io ────────────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
-  console.log('Client connected:', socket.id)
+  console.log('🔗 Client connected:', socket.id)
 
   // Create room
   socket.on('create_room', ({ name }) => {
@@ -90,7 +103,7 @@ io.on('connection', (socket) => {
     socket.data.roomId = roomId
     socket.data.name = name
     socket.emit('room_created', { roomId, room: rooms[roomId] })
-    console.log(`Room ${roomId} created by ${name}`)
+    console.log(`✅ Room ${roomId} created by ${name}`)
   })
 
   // Join room
@@ -99,6 +112,7 @@ io.on('connection', (socket) => {
     const room = getRoom(id)
     if (!room) {
       socket.emit('error', { message: 'Room not found' })
+      console.warn(`❌ Join failed: room ${id} not found`)
       return
     }
     if (room.members.find((m) => m.id === socket.id)) {
@@ -120,7 +134,7 @@ io.on('connection', (socket) => {
     socket.data.roomId = id
     socket.data.name = name
 
-    // Send current state to new joiner
+    // Send current state to new joiner with server timestamp for sync
     const currentState = { ...room.state, serverTime: Date.now() }
     socket.emit('room_joined', {
       roomId: id,
@@ -132,16 +146,31 @@ io.on('connection', (socket) => {
     // Notify others
     io.to(id).emit('members_updated', { members: room.members })
     socket.to(id).emit('user_joined', { name, id: socket.id })
-    console.log(`${name} joined room ${id}`)
+    console.log(
+      `✅ ${name} joined room ${id}, total members: ${room.members.length}`,
+    )
   })
 
   // Play / Pause
   socket.on('play_pause', ({ roomId, playing, position }) => {
+    console.log(
+      `🎵 play_pause from ${socket.data.name}: ${playing ? '▶️ PLAY' : '⏸️ PAUSE'}`,
+    )
     const room = getRoom(roomId)
-    if (!room || !canControl(room, socket.id)) return
+    if (!room) {
+      console.warn(`❌ Room ${roomId} not found`)
+      return
+    }
+    if (!canControl(room, socket.id)) {
+      console.warn(`❌ ${socket.data.name} denied play_pause in ${roomId}`)
+      return
+    }
     room.state.playing = playing
     room.state.position = position
     room.state.timestamp = Date.now()
+    console.log(
+      `📡 ${socket.data.name}: ${playing ? '▶️ PLAY' : '⏸️ PAUSE'} at ${position.toFixed(2)}s`,
+    )
     io.to(roomId).emit('sync_state', { ...room.state, serverTime: Date.now() })
   })
 
@@ -156,25 +185,49 @@ io.on('connection', (socket) => {
 
   // Add to queue
   socket.on('add_to_queue', ({ roomId, track }) => {
+    console.log(`📤 add_to_queue received from ${socket.data.name}`, {
+      roomId,
+      track: track?.name,
+    })
     const room = getRoom(roomId)
-    if (!room || !canControl(room, socket.id)) return
+    if (!room) {
+      console.warn(`❌ Room ${roomId} not found`)
+      return
+    }
+    if (!canControl(room, socket.id)) {
+      console.warn(`❌ ${socket.data.name} does not have control in ${roomId}`)
+      return
+    }
     const entry = { ...track, id: uuidv4(), addedBy: socket.data.name }
     room.queue.push(entry)
+    console.log(
+      `✅ Added track to queue: ${track?.name}, queue size now: ${room.queue.length}`,
+    )
     if (!room.state.currentTrack) {
       room.state.currentTrack = entry
       room.state.position = 0
       room.state.timestamp = Date.now()
+      console.log(`⚡ Set as current track: ${track?.name}`)
     }
     io.to(roomId).emit('queue_updated', {
       queue: room.queue,
       state: room.state,
     })
+    console.log(`📡 Broadcast queue_updated to room ${roomId}`)
   })
 
   // Next track
   socket.on('next_track', ({ roomId }) => {
+    console.log(`⏭️ next_track from ${socket.data.name}`)
     const room = getRoom(roomId)
-    if (!room || !canControl(room, socket.id)) return
+    if (!room) {
+      console.warn(`❌ Room ${roomId} not found`)
+      return
+    }
+    if (!canControl(room, socket.id)) {
+      console.warn(`❌ ${socket.data.name} denied next_track in ${roomId}`)
+      return
+    }
     const idx = room.queue.findIndex(
       (t) => t.id === room.state.currentTrack?.id,
     )
@@ -183,6 +236,7 @@ io.on('connection', (socket) => {
     room.state.position = 0
     room.state.playing = !!next
     room.state.timestamp = Date.now()
+    console.log(`✅ Next track: ${next?.name || 'QUEUE ENDED'}`)
     io.to(roomId).emit('queue_updated', {
       queue: room.queue,
       state: room.state,
@@ -192,8 +246,16 @@ io.on('connection', (socket) => {
 
   // Prev track
   socket.on('prev_track', ({ roomId }) => {
+    console.log(`⏮️ prev_track from ${socket.data.name}`)
     const room = getRoom(roomId)
-    if (!room || !canControl(room, socket.id)) return
+    if (!room) {
+      console.warn(`❌ Room ${roomId} not found`)
+      return
+    }
+    if (!canControl(room, socket.id)) {
+      console.warn(`❌ ${socket.data.name} denied prev_track in ${roomId}`)
+      return
+    }
     const idx = room.queue.findIndex(
       (t) => t.id === room.state.currentTrack?.id,
     )
@@ -202,6 +264,7 @@ io.on('connection', (socket) => {
     room.state.position = 0
     room.state.playing = !!prev
     room.state.timestamp = Date.now()
+    console.log(`✅ Prev track: ${prev?.name || 'NO TRACK'}`)
     io.to(roomId).emit('queue_updated', {
       queue: room.queue,
       state: room.state,
@@ -280,19 +343,25 @@ io.on('connection', (socket) => {
   // Disconnect
   socket.on('disconnect', () => {
     const roomId = socket.data.roomId
-    if (!roomId) return
+    if (!roomId) {
+      console.log(`🔌 Client disconnected: ${socket.id}`)
+      return
+    }
     const room = getRoom(roomId)
     if (!room) return
     room.members = room.members.filter((m) => m.id !== socket.id)
     if (room.hostId === socket.id) {
       // Host left — dissolve room
+      console.log(
+        `🔴 Host ${socket.data.name} left room ${roomId} — dissolving`,
+      )
       io.to(roomId).emit('room_dissolved', { message: 'Host left the room' })
       delete rooms[roomId]
     } else {
       io.to(roomId).emit('members_updated', { members: room.members })
       socket.to(roomId).emit('user_left', { name: socket.data.name })
+      console.log(`👋 ${socket.data.name} disconnected from ${roomId}`)
     }
-    console.log(`${socket.data.name} disconnected from ${roomId}`)
   })
 })
 
